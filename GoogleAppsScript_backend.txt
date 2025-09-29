@@ -1,0 +1,77 @@
+// === Google Apps Script: Sheets backend (UPSERT + DELETE) ===
+// Create a Google Sheet 'Inventory Entries' with tabs:
+// 'inventory_entries', 'inventory_entries_dehu', 'inventory_entries_chakan'
+// Headers: ID | Timestamp | Plant | Auditor | PartCode | Quantity | Zone
+//
+// Deploy as Web App (Execute as Me; Access: Anyone with the link).
+// The frontend posts text/plain JSON with fields {op:'upsert'|'delete', id, ts, plant, auditor, part, qty, zone}.
+
+const SHEET_ID = SpreadsheetApp.getActive().getId();
+const HEADERS = ['ID','Timestamp','Plant','Auditor','PartCode','Quantity','Zone'];
+const CFG = { ALL:'inventory_entries', Dehu:'inventory_entries_dehu', Chakan:'inventory_entries_chakan' };
+
+function doPost(e){
+  try{
+    const body = e.postData && e.postData.contents ? e.postData.contents : '{}';
+    const data = JSON.parse(body);
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const shAll = ensureSheet(ss, CFG.ALL);
+    const shDehu = ensureSheet(ss, CFG.Dehu);
+    const shChakan = ensureSheet(ss, CFG.Chakan);
+
+    if (data.op === 'delete'){
+      // delete by ID from all three sheets
+      let deleted = 0;
+      deleted += deleteById(shAll, data.id);
+      deleted += deleteById(shDehu, data.id);
+      deleted += deleteById(shChakan, data.id);
+      return json({ok:true, deleted});
+    }
+
+    // UPSERT: remove old rows with same ID, then insert fresh in ALL + location
+    const row = [ data.id, data.ts || new Date().toISOString(), data.plant || '', data.auditor || '', data.part || '', Number(data.qty || 0), data.zone || '' ];
+    deleteById(shAll, data.id);
+    deleteById(shDehu, data.id);
+    deleteById(shChakan, data.id);
+
+    shAll.appendRow(row);
+    const locName = data.plant === 'Dehu' ? CFG.Dehu : (data.plant === 'Chakan' ? CFG.Chakan : null);
+    if (locName){
+      const shLoc = ss.getSheetByName(locName);
+      shLoc.appendRow(row);
+    }
+    return json({ok:true, upsert:true});
+  }catch(err){
+    return json({ok:false, error:String(err)});
+  }
+}
+
+function ensureSheet(ss, name){
+  const sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  const head = sh.getRange(1,1,1,HEADERS.length).getValues()[0];
+  if (head[0] !== HEADERS[0]) sh.getRange(1,1,1,HEADERS.length).setValues([HEADERS]);
+  return sh;
+}
+
+function findRowById(sh, id){
+  if (!id) return -1;
+  const last = sh.getLastRow();
+  if (last < 2) return -1;
+  const values = sh.getRange(2,1,last-1,1).getValues(); // Column A (ID)
+  for (let i=0; i<values.length; i++){
+    if (String(values[i][0]) === String(id)) return i+2; // row index
+  }
+  return -1;
+}
+
+function deleteById(sh, id){
+  const r = findRowById(sh, id);
+  if (r > 0){ sh.deleteRow(r); return 1; }
+  return 0;
+}
+
+function json(obj){
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function doGet(){ return ContentService.createTextOutput('OK'); }
